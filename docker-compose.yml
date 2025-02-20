@@ -1,0 +1,6 @@
+services:
+  server:
+    build: .
+    ports:
+      - 9009:9009
+    restart: unless-stopped

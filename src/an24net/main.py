@@ -1,11 +1,10 @@
 from asyncio import Queue, QueueFull, StreamReader, StreamWriter, Task, TaskGroup
 import asyncio
 from contextlib import contextmanager
-from functools import partial
 import logging
 import signal
 import sys
-from typing import Any, Optional, TypedDict
+from typing import Optional, TypedDict
 
 START_COMMAND = 0x94
 MAC_COMMAND = 0xC4
@@ -94,7 +93,6 @@ def my_home_to_str(data: bytes) -> "str | Status":
 
 
 def command_to_str(command: int, data: bytes | None) -> str:
-    # print(f"Raw: {command:02x} {data.hex(':')}")
     if command == START_COMMAND:
         return "START"
     elif command == CONNECTION_COMMAND:
@@ -313,7 +311,7 @@ class Listenable[T]:
     def __init__(self):
         self._listeners: list[Queue[T]] = []
 
-    def emit(self, data: Any):
+    def emit(self, data: T):
         for listener in self._listeners:
             try:
                 listener.put_nowait(data)
@@ -372,7 +370,7 @@ async def send_command(
     await writer.drain()
 
 
-OPEN_CONNECTIONS: dict[str, tuple[StreamWriter, Listenable[tuple[int, bytes]]]] = {}
+OPEN_CONNECTIONS: dict[bytes, tuple[StreamWriter, Listenable[tuple[int, bytes]]]] = {}
 
 
 async def handle(
@@ -382,38 +380,41 @@ async def handle(
 ):
     _logger.info("New connection")
 
-    mac = None
-    version = None
-
-    receive = Listenable[tuple[int, bytes]]()
-
     async with TaskGroup() as tg:
 
         async def __downstream_client(data: bytes):
             logger = _logger.getChild("downstream_client")
 
-            nonlocal mac
             mac = data[9:15]
             logger.info(f"MAC: {mac.hex(':')}")
 
-            alarm = OPEN_CONNECTIONS.get(mac.hex(":"), None)
+            alarm = OPEN_CONNECTIONS.get(mac, None)
             if not alarm:
-                writer.write(bytes([0xE4]))
+                writer.write(b"\xe4")
                 await writer.drain()
                 return
 
-            writer.write(bytes([0xE6, 0x0E]))
+            writer.write(b"\xe6\x0e")
             await writer.drain()
 
-            while True:
-                command, data = await read_command(reader)
-                logger.info(f"received: {command_to_str(command, data)}")
-
+            async def __handle_push():
                 with alarm[1].listener() as listener:
-                    await send_command(alarm[0], command, data)
-                    async with asyncio.timeout(5):
+                    while True:
+                        command, data = await listener.get()
+                        if command == PUSH_COMMAND:
+                            logger.info(f"sending {command_to_str(command, data)}")
+                            await send_command(writer, PUSH_COMMAND, data)
+
+            async def __handle_server():
+                while True:
+                    command, data = await read_command(reader)
+                    logger.info(f"received: {command_to_str(command, data)}")
+
+                    with alarm[1].listener() as listener:
+                        await send_command(alarm[0], command, data)
                         while True:
-                            command_, data = await listener.get()
+                            async with asyncio.timeout(5):
+                                command_, data = await listener.get()
                             if command_ == command:
                                 logger.info(
                                     f"sending: {command_to_str(command_, data)}"
@@ -421,12 +422,15 @@ async def handle(
                                 await send_command(writer, command_, data)
                                 break
 
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(__handle_push())
+                tg.create_task(__handle_server())
+
         async def __downstream_alarm():
             logger = _logger.getChild("downstream_alarm")
 
             logger.info("sending MAC REQUEST")
             await send_command(writer, MAC_COMMAND)
-            nonlocal mac
             command, mac = await read_command(reader)
             if command != MAC_COMMAND:
                 raise Exception("Invalid data")
@@ -434,7 +438,6 @@ async def handle(
 
             logger.info("sending VERSION REQUEST")
             await send_command(writer, VERSION_COMMAND)
-            nonlocal version
             command, version = await read_command(reader)
             if command != VERSION_COMMAND:
                 raise Exception("Invalid data")
@@ -450,9 +453,10 @@ async def handle(
                 bytes.fromhex("24 08 07 03 17 30 47"),
             )
 
-            OPEN_CONNECTIONS[mac.hex(":")] = (writer, receive)
+            receive = Listenable[tuple[int, bytes]]()
+            OPEN_CONNECTIONS[mac] = (writer, receive)
             try:
-                tg.create_task(__upstream())
+                tg.create_task(__upstream(receive, mac, version))
 
                 while True:
                     command, data = await read_command(reader)
@@ -462,7 +466,7 @@ async def handle(
                     logger.info("sending OK")
                     await send_command(writer, OK)
             finally:
-                OPEN_CONNECTIONS.pop(mac.hex(":"))
+                OPEN_CONNECTIONS.pop(mac)
 
         async def __downstream():
             logger = _logger.getChild("downstream")
@@ -484,13 +488,18 @@ async def handle(
                 else:
                     raise Exception("Invalid data")
 
-        async def __upstream():
+        async def __upstream(
+            receive: Listenable[tuple[int, bytes]],
+            mac: bytes,
+            version: bytes,
+        ):
             logger = _logger.getChild("upstream")
 
             while True:
                 try:
                     u_reader, u_writer = await asyncio.open_connection(
-                        "amt.intelbras.com.br", 9009
+                        host="amt.intelbras.com.br",
+                        port=9009,
                     )
                     logger.info("connected")
 
@@ -498,9 +507,8 @@ async def handle(
                     await send_command(
                         u_writer,
                         START_COMMAND,
-                        bytes.fromhex("45 12 12 52 57 19"),
+                        b"\x45\x12\x12\x52\x57\x19",
                     )
-
                     command, _ = await read_command(u_reader)
                     if command != OK:
                         raise Exception("Invalid data")
@@ -540,7 +548,8 @@ async def handle(
                                 with receive.listener() as listener:
                                     await send_command(writer, command, data)
                                     while True:
-                                        command_, data = await listener.get()
+                                        async with asyncio.timeout(5):
+                                            command_, data = await listener.get()
                                         if command_ == command:
                                             response = data
                                             break
@@ -571,56 +580,32 @@ async def main():
 
     tasks: list[Task] = []
 
-    async def handler(reader: StreamReader, writer: StreamWriter):
-        task = asyncio.current_task()
-        if task:
-            tasks.append(task)
-        await handle(logger, reader, writer)
-
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
+    if task:
+        tasks.append(task)
 
     def cancel():
-        nonlocal task
-        if task:
-            task.cancel()
         for task in tasks:
             task.cancel()
 
     loop.add_signal_handler(signal.SIGINT, cancel)
     loop.add_signal_handler(signal.SIGTERM, cancel)
 
+    async def handler(reader: StreamReader, writer: StreamWriter):
+        task = asyncio.current_task()
+        if task:
+            tasks.append(task)
+        await handle(logger, reader, writer)
+
     logger.info("Serving on 0.0.0.0:9009")
     server = await asyncio.start_server(handler, "0.0.0.0", 9009)
     await server.serve_forever()
 
 
-if __name__ == "__main__":
-    # msg = b"\x0c\xe9\x00\xf1\x00\x00\x00\x040\x03\x00Ip\xeb"
-
-    # length = msg[0]
-    # data = msg[1 : length + 1]
-    # checksum_ = msg[length + 1]
-
-    # expected_checksum = checksum(data)
-    # byte = msg[11]
-
-    # x = byte - 1
-    # for i in range(0, 128, 10):
-    #     cmd = bytes(
-    #         [
-    #             0x00,
-    #             (((byte - 1) - i) + 128) % 128,
-    #         ]
-    #     )
-    #     sync_data(0x39, cmd)
-    #     print(f"Command: {cmd.hex(' ')}")
-
-    # print(f"Message: {msg.hex(' ')}")
-    # print(f"Length: {length:02x}")
-    # print(f"Data: {data.hex(' ')}")
-    # print(f"Checksum: {checksum_:02x}")
-    # print(f"Expected checksum: {expected_checksum:02x}")
-    # print(f"Byte: {byte:02x}")
-
+def run():
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()
