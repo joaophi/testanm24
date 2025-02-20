@@ -410,17 +410,17 @@ async def handle(
                     command, data = await read_command(reader)
                     logger.info(f"received: {command_to_str(command, data)}")
 
+                    response = None
                     with alarm[1].listener() as listener:
                         await send_command(alarm[0], command, data)
-                        while True:
-                            async with asyncio.timeout(5):
+                        async with asyncio.timeout(5):
+                            while True:
                                 command_, data = await listener.get()
-                            if command_ == command:
-                                logger.info(
-                                    f"sending: {command_to_str(command_, data)}"
-                                )
-                                await send_command(writer, command_, data)
-                                break
+                                if command_ == command:
+                                    response = data
+                                    break
+                    logger.info(f"sending: {command_to_str(command, response)}")
+                    await send_command(writer, command, response)
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(__handle_push())
@@ -547,12 +547,12 @@ async def handle(
                                 )
                                 with receive.listener() as listener:
                                     await send_command(writer, command, data)
-                                    while True:
-                                        async with asyncio.timeout(5):
+                                    async with asyncio.timeout(5):
+                                        while True:
                                             command_, data = await listener.get()
-                                        if command_ == command:
-                                            response = data
-                                            break
+                                            if command_ == command:
+                                                response = data
+                                                break
 
                             logger.info(f"sending {command_to_str(command, response)}")
                             await send_command(u_writer, command, response)
