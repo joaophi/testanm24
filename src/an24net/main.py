@@ -444,6 +444,7 @@ async def handle(
                 raise Exception("Invalid data")
             logger.info(f"Version: {version}")
 
+            logger.info("reading TIME REQUEST")
             command, [tz] = await read_command(reader)
             if command != TIME_COMMAND:
                 raise Exception("Invalid data")
@@ -452,16 +453,8 @@ async def handle(
             await send_command(
                 writer,
                 TIME_COMMAND,
-                bytes(
-                    [
-                        now.year - 2000,
-                        now.month,
-                        now.day,
-                        0x04,
-                        now.hour,
-                        now.minute,
-                        now.second,
-                    ]
+                bytes.fromhex(
+                    f"{now.year - 2000:02} {now.month:02} {now.day:02} 04 {now.hour:02} {now.minute:02} {now.second:02}"
                 ),
             )
 
@@ -620,4 +613,5 @@ def run():
 
 
 if __name__ == "__main__":
+    print(datetime.now(tz=timezone(timedelta(hours=-3))))
     run()
