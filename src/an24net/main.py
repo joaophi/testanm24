@@ -1,6 +1,7 @@
 from asyncio import Queue, QueueFull, StreamReader, StreamWriter, Task, TaskGroup
 import asyncio
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import logging
 import signal
 import sys
@@ -9,7 +10,7 @@ from typing import Optional, TypedDict
 START_COMMAND = 0x94
 MAC_COMMAND = 0xC4
 VERSION_COMMAND = 0xC0
-UNKNOWN_COMMAND = 0x80
+TIME_COMMAND = 0x80
 PING_COMMAND = 0xF7
 PUSH_COMMAND = 0xB4
 OK = 0xFE
@@ -103,7 +104,7 @@ def command_to_str(command: int, data: bytes | None) -> str:
         return "MAC" + (f": {data.hex(':')}" if data else "")
     elif command == VERSION_COMMAND:
         return "VERSION" + (f": {data.decode('ascii')}" if data else "")
-    elif command == UNKNOWN_COMMAND:
+    elif command == TIME_COMMAND:
         return "UNKNOWN" + (f": {data.hex(':')}" if data else "")
     elif command == PING_COMMAND:
         return "PING"
@@ -443,14 +444,25 @@ async def handle(
                 raise Exception("Invalid data")
             logger.info(f"Version: {version}")
 
-            command, data = await read_command(reader)
-            if command != UNKNOWN_COMMAND:
+            command, [tz] = await read_command(reader)
+            if command != TIME_COMMAND:
                 raise Exception("Invalid data")
-            logger.info(f"Data: {data}")
+            logger.info(f"Timezone: {tz}")
+            now = datetime.now(tz=timezone(timedelta(hours=-tz)))
             await send_command(
                 writer,
-                UNKNOWN_COMMAND,
-                bytes.fromhex("24 08 07 03 17 30 47"),
+                TIME_COMMAND,
+                bytes(
+                    [
+                        now.year - 2000,
+                        now.month,
+                        now.day,
+                        0x04,
+                        now.hour,
+                        now.minute,
+                        now.second,
+                    ]
+                ),
             )
 
             receive = Listenable[tuple[int, bytes]]()
