@@ -69,7 +69,7 @@ def my_home_to_str(data: bytes) -> "str | Status":
         return f"CMD = {command}, PASSWORD = {password}"
     else:
         try:
-            type, messages = parse_sync(data)
+            type, _ = parse_sync(data)
             if type == SYNC_EVENT:
                 sync = "EVENT"
             elif type == SYNC_NAME:
@@ -80,13 +80,13 @@ def my_home_to_str(data: bytes) -> "str | Status":
                 sync = "ZONE"
             else:
                 sync = f"0x{type:02x}"
-            return f"SYNC = {sync}, MESSAGES = {messages}"
+            return f"SYNC = {sync}"
         except Exception:
             pass
 
         try:
-            status = parse_status(data)
-            return status
+            parse_status(data)
+            return "STATUS"
         except Exception:
             pass
 
