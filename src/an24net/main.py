@@ -124,6 +124,8 @@ def create_command(command: int, data: bytes | None = None) -> bytes:
     if data is None:
         data = bytes()
     data = bytes([len(data) + 1, command, *data])
+    if command == MY_HOME and data[1] == 0x00:
+        return data
     return bytes([*data, checksum(data)])
 
 
@@ -348,6 +350,8 @@ async def read_command(reader: StreamReader):
     data = await reader.read(length)
     [checksum_] = await reader.read(1)
     if checksum_ != checksum(bytes([length, *data])):
+        if data[0] == MY_HOME and data[1] == 0x00:
+            return data[0], bytes([*data[1:], checksum_])
         raise Exception(f"Invalid checksum {checksum_:02x} for data: {data}")
 
     return data[0], data[1:]
