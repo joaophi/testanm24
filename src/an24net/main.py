@@ -105,7 +105,7 @@ def command_to_str(command: int, data: bytes | None) -> str:
     elif command == VERSION_COMMAND:
         return "VERSION" + (f": {data.decode('ascii')}" if data else "")
     elif command == TIME_COMMAND:
-        return "UNKNOWN" + (f": {data.hex(':')}" if data else "")
+        return "TIME" + (f": tz={-data[0]}" if data else "")
     elif command == PING_COMMAND:
         return "PING"
     elif command == PUSH_COMMAND:
@@ -448,20 +448,6 @@ async def handle(
                 raise Exception("Invalid data")
             logger.info(f"Version: {version}")
 
-            logger.info("reading TIME REQUEST")
-            command, [tz] = await read_command(reader)
-            if command != TIME_COMMAND:
-                raise Exception("Invalid data")
-            logger.info(f"Timezone: {tz}")
-            now = datetime.now(tz=timezone(timedelta(hours=-tz)))
-            await send_command(
-                writer,
-                TIME_COMMAND,
-                bytes.fromhex(
-                    f"{now.year - 2000:02} {now.month:02} {now.day:02} 04 {now.hour:02} {now.minute:02} {now.second:02}"
-                ),
-            )
-
             receive = Listenable[tuple[int, bytes]]()
             OPEN_CONNECTIONS[mac] = (writer, receive)
             try:
@@ -472,8 +458,20 @@ async def handle(
                     logger.info(f"received: {command_to_str(command, data)}")
                     receive.emit((command, data))
 
-                    logger.info("sending OK")
-                    await send_command(writer, OK)
+                    if command == TIME_COMMAND:
+                        tz = -data[0]
+                        now = datetime.now(tz=timezone(timedelta(hours=tz)))
+                        logger.info(f"sending TIME: {now}")
+                        await send_command(
+                            writer,
+                            TIME_COMMAND,
+                            bytes.fromhex(
+                                f"{now.year - 2000:02} {now.month:02} {now.day:02} 04 {now.hour:02} {now.minute:02} {now.second:02}"
+                            ),
+                        )
+                    else:
+                        logger.info("sending OK")
+                        await send_command(writer, OK)
             finally:
                 OPEN_CONNECTIONS.pop(mac)
 
